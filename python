@@ -1,0 +1,122 @@
+import os
+import json
+from flask import Flask, request, render_template_string, redirect, url_for, make_response
+from flask_bcrypt import Bcrypt
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required,
+    get_jwt_identity, unset_jwt_cookies, set_access_cookies
+)
+from datetime import timedelta
+
+app = Flask(__name__)
+app.config['JWT_SECRET_KEY'] = 'super-secret-key'
+app.config['JWT_TOKEN_LOCATION'] = ['cookies']
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=30)
+app.config['JWT_COOKIE_SECURE'] = False
+app.config['JWT_COOKIE_SAMESITE'] = 'Lax'
+app.config['JWT_COOKIE_CSRF_PROTECT'] = False
+
+bcrypt = Bcrypt(app)
+jwt = JWTManager(app)
+
+USERS_FILE = 'users.json'
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_users(users):
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users, f)
+
+users = load_users()
+
+# ------------------ Templates ------------------
+
+style = """<style>body{font-family:sans-serif;background:#f4f4f4;display:flex;justify-content:center;align-items:center;height:100vh;}
+.container{background:white;padding:2rem;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,0.1);max-width:400px;width:100%;}
+input,button{width:100%;padding:10px;margin:0.5rem 0;border-radius:5px;border:1px solid #ccc;}
+button{background:#007BFF;color:white;border:none;}button:hover{background:#0056b3;}.link{text-align:center;margin-top:1rem;}
+</style>"""
+
+register_html = style + """
+<div class="container">
+  <h2>Register</h2>
+  <form method="post">
+    <input name="username" placeholder="Username" required>
+    <input type="password" name="password" placeholder="Password" required>
+    <button type="submit">Register</button>
+  </form>
+  <div class="link"><a href="/login">Already have an account? Login</a></div>
+</div>"""
+
+login_html = style + """
+<div class="container">
+  <h2>Login</h2>
+  <form method="post">
+    <input name="username" placeholder="Username" required>
+    <input type="password" name="password" placeholder="Password" required>
+    <button type="submit">Login</button>
+  </form>
+  <div class="link"><a href="/register">Don't have an account? Register</a></div>
+</div>"""
+
+dashboard_html = style + """
+<div class="container">
+  <h2>Welcome, {{ user }}</h2>
+  <p>You're logged in securely.</p>
+  <form method="post" action="/logout"><button type="submit">Logout</button></form>
+</div>"""
+
+# ------------------ Routes ------------------
+
+@app.route('/')
+def home():
+    return redirect('/login')
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    global users
+    if request.method == 'POST':
+        username = request.form['username'].strip()
+        password = request.form['password']
+        if username in users:
+            return "❌ User already exists", 400
+        hashed = bcrypt.generate_password_hash(password).decode('utf-8')
+        users[username] = hashed
+        save_users(users)
+        return redirect('/login')
+    return render_template_string(register_html)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    global users
+    users = load_users()  # Refresh from file
+    if request.method == 'POST':
+        username = request.form['username'].strip()
+        password = request.form['password']
+        hashed = users.get(username)
+        if hashed and bcrypt.check_password_hash(hashed, password):
+            token = create_access_token(identity=username)
+            resp = make_response(redirect('/dashboard'))
+            set_access_cookies(resp, token)
+            return resp
+        return "❌ Invalid username or password", 401
+    return render_template_string(login_html)
+
+@app.route('/dashboard')
+@jwt_required()
+def dashboard():
+    user = get_jwt_identity()
+    return render_template_string(dashboard_html, user=user)
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    resp = make_response(redirect('/login'))
+    unset_jwt_cookies(resp)
+    return resp
+
+if __name__ == '__main__':
+    app.run(debug=True)
